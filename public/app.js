@@ -56,6 +56,9 @@
     btnCancel: $('btn-cancel'),
     btnEstop: $('btn-estop'),
     btnReconnect: $('btn-reconnect'),
+    diagnostics: $('diagnostics'),
+    diagHint: $('diag-hint'),
+    diagBaud: $('diag-baud'),
 
     dropzone: $('dropzone'),
     fileInput: $('file-input'),
@@ -390,7 +393,9 @@
     el.btnPause.textContent = paused ? 'Resume' : 'Pause';
     el.btnPause.classList.toggle('primary', true);
     el.btnCancel.disabled = !active;
-    el.btnReconnect.hidden = !(snap.state === 'offline' || snap.state === 'error');
+    const needsHelp = snap.state === 'offline' || snap.state === 'error';
+    el.diagnostics.hidden = !needsHelp;
+    if (needsHelp) loadDiagnostics();
 
     // Upload button
     el.btnUpload.disabled = !state.pendingFile;
@@ -594,8 +599,14 @@
     });
 
     el.btnReconnect.addEventListener('click', () => {
-      withBusy(el.btnReconnect, 'Reconnecting…', async () => {
-        await api('/api/control/reconnect', { method: 'POST' });
+      withBusy(el.btnReconnect, 'Connecting…', async () => {
+        const baudrate = el.diagBaud.value ? Number(el.diagBaud.value) : undefined;
+        await api('/api/control/reconnect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baudrate }),
+        });
+        diagAt = 0; // re-check straight away rather than waiting out the cache
         toast('Reconnect requested.', 'ok');
         clearBanner('estop');
       });
@@ -807,6 +818,45 @@
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
+  }
+
+  // --- Diagnostics ---------------------------------------------------------
+  //
+  // "Offline" hides two different faults: the machine cannot see the printer,
+  // or it can see it but nothing has opened the link. They need opposite
+  // fixes, so the dashboard says which one it is rather than leaving it to
+  // guesswork.
+
+  let diagAt = 0;
+
+  async function loadDiagnostics() {
+    // Asking OctoPrint for its port list on every poll would be wasteful.
+    if (Date.now() - diagAt < 15000) return;
+    diagAt = Date.now();
+
+    try {
+      const d = await api('/api/diagnostics');
+      el.diagHint.textContent = d.hint;
+
+      // Offer the baud rates OctoPrint reports, so a wrong guess is one tap
+      // to correct rather than a trip to its settings.
+      if (d.baudrates?.length && !el.diagBaud.options.length) {
+        const auto = document.createElement('option');
+        auto.value = '';
+        auto.textContent = 'AUTO';
+        el.diagBaud.appendChild(auto);
+        for (const rate of d.baudrates) {
+          const option = document.createElement('option');
+          option.value = String(rate);
+          option.textContent = String(rate);
+          el.diagBaud.appendChild(option);
+        }
+      }
+      el.diagBaud.hidden = d.verdict === 'no-port' || d.verdict === 'no-octoprint';
+      el.btnReconnect.hidden = d.verdict === 'no-octoprint';
+    } catch {
+      el.diagHint.textContent = 'The printer is offline.';
+    }
   }
 
   // --- Live G-code ---------------------------------------------------------

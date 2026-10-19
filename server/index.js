@@ -133,10 +133,39 @@ app.post('/api/control/emergency-stop', route(async (_req, res) => {
   });
 }));
 
-app.post('/api/control/reconnect', route(async (_req, res) => {
-  await octo.connectPrinter();
-  logEvent('info', 'reconnect', 'Reconnect requested.');
+app.post('/api/control/reconnect', route(async (req, res) => {
+  const { port, baudrate } = req.body || {};
+  await octo.connectPrinter(port, baudrate);
+  logEvent('info', 'reconnect',
+    `Reconnect requested${port ? ` on ${port}` : ''}${baudrate ? ` at ${baudrate}` : ''}.`);
   res.json({ ok: true });
+}));
+
+/**
+ * Why the printer is offline, in terms that point at a fix.
+ *
+ * "Offline" covers two very different faults — the machine cannot see the
+ * printer, or it can see it but nothing has opened the link — and they need
+ * opposite responses. Guessing between them is most of the frustration of
+ * setting this up.
+ */
+app.get('/api/diagnostics', route(async (_req, res) => {
+  const snap = getSnapshot();
+  try {
+    const serial = await octo.serialDiagnostics();
+    return res.json({ state: snap.state, octoprint: 'reachable', ...serial });
+  } catch (err) {
+    // Could not even ask OctoPrint — so the fault is before the serial layer.
+    return res.json({
+      state: snap.state,
+      octoprint: 'unreachable',
+      verdict: 'no-octoprint',
+      hint: `${err.message} The dashboard is running, but it cannot reach OctoPrint itself. `
+        + 'Check OCTOPRINT_URL and that the OctoPrint service is running.',
+      ports: [],
+      baudrates: [],
+    });
+  }
 }));
 
 app.post('/api/control/temperature', route(async (req, res) => {

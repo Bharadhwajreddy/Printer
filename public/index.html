@@ -92,7 +92,13 @@
       <button id="btn-estop" class="estop" type="button">Emergency stop</button>
     </div>
     <p class="muted small">Emergency stop sends M112. The printer halts instantly and needs a reconnect or power cycle afterwards.</p>
-    <button id="btn-reconnect" class="ghost small" type="button" hidden>Reconnect printer</button>
+    <div id="diagnostics" class="diagnostics" hidden>
+      <p id="diag-hint" class="small"></p>
+      <div class="diag-actions">
+        <select id="diag-baud" aria-label="Baud rate"></select>
+        <button id="btn-reconnect" class="ghost small" type="button">Connect printer</button>
+      </div>
+    </div>
   </section>
 
   <!-- Live G-code: the file scrolling past as the printer consumes it -->

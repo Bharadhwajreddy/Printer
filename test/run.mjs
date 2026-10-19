@@ -589,6 +589,42 @@ try {
       `notifications failed: ${notifyFailures.map((e) => e.message).join('; ')}`);
   });
 
+  console.log('\nDiagnosing an offline printer');
+
+  await test('a visible port but a closed link is named as such', async () => {
+    octoMock.setMode('disconnected');
+    octoMock.setPorts(['/dev/ttyUSB0']);
+    await waitForState('offline');
+    const { body } = await call('/api/diagnostics');
+    assert.equal(body.verdict, 'port-but-closed');
+    assert.match(body.hint, /115200/, 'should suggest the baud rates to try');
+    assert.deepEqual(body.ports, ['/dev/ttyUSB0']);
+  });
+
+  await test('no serial port at all points at the cable, not the baud rate', async () => {
+    octoMock.setPorts([]);
+    const { body } = await call('/api/diagnostics');
+    assert.equal(body.verdict, 'no-port');
+    assert.match(body.hint, /charge-only|data cable/i, 'should name the usual cause');
+    assert.ok(!/115200/.test(body.hint), 'baud rate is irrelevant when no port exists');
+  });
+
+  await test('the reconnect accepts a chosen baud rate', async () => {
+    const { status } = await post('/api/control/reconnect', { baudrate: 115200 });
+    assert.equal(status, 200);
+    const last = octoMock.received.filter((r) => r.path === '/api/connection').at(-1);
+    assert.equal(last.body.command, 'connect');
+    assert.equal(last.body.baudrate, 115200);
+  });
+
+  await test('the printer coming back is reflected', async () => {
+    octoMock.setPorts(['/dev/ttyUSB0']);
+    octoMock.setMode('printing');
+    await waitForState('printing');
+    const { body } = await call('/api/diagnostics');
+    assert.equal(body.verdict, 'connected');
+  });
+
   console.log('\nOctoPrint downtime');
 
   await test('losing OctoPrint yields a clear offline state, not a crash', async () => {
