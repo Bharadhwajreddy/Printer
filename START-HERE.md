@@ -59,6 +59,9 @@ change.
 - Pause, resume, cancel, emergency stop
 - Upload and print in one action; reprint without re-uploading
 - Home, auto bed level, cool down — unsafe mid-print commands refused
+- **Motion and tuning** — jog X/Y/Z, extrude and retract, fan, print speed,
+  flow and Z babystep; anything that moves the head is refused mid-print
+- **Layer view in 2D and 3D**, with the SV02's shared nozzle modelled correctly
 - **Alerts with a photo attached** on start, completion, failure and faults
 - **Failure detection**: a temperature off target, or a print that has stopped
   progressing while OctoPrint still says it is printing
@@ -83,7 +86,7 @@ Work backwards and fix the earliest failure:
 | `docs/` | setup guide, and the nozzle-as-probe research |
 | `server/` | the backend, including `gcode.js` for the layer and line views |
 | `public/` | the dashboard |
-| `test/` | 61 end-to-end tests, plus mock printer, camera and ntfy |
+| `test/` | 90 end-to-end tests, plus mock printer, camera and ntfy |
 | `scripts/check.mjs` | the `npm run check` connection checker |
 | `deploy/` | the systemd service file |
 | `.env.example` | every setting, explained |

@@ -2,6 +2,7 @@ import { config } from './config.js';
 import { logEvent } from './log.js';
 import * as octo from './octoprint.js';
 import * as notify from './notify.js';
+import { parseGcode, locate } from './gcode-model.js';
 
 /**
  * Single background poller. Every browser tab reads this one cached snapshot
@@ -19,14 +20,42 @@ let snapshot = {
 };
 
 /**
- * Anomaly tracking, keyed by OctoPrint's own sensor name ('tool0', 'tool1',
- * 'bed'). Discovered from the reported temperatures rather than hardcoded:
- * the SV02 is a dual-extruder machine, so how many hotends exist depends on
- * the printer and its firmware, not on an assumption made here.
+ * Anomaly tracking, keyed by OctoPrint's own sensor name ('tool0', 'bed', ...).
+ * Discovered from the reported temperatures rather than hardcoded: how many
+ * heaters exist depends on the printer, its firmware and its profile, not on an
+ * assumption made here. (The SV02 has two extruder drives but ONE heater.)
  *
  * @type {Map<string, number>} sensor key -> epoch ms it first went out of range
  */
 const deviationSince = new Map();
+
+/**
+ * Rolling temperature history for the dashboard graph. Kept server-side rather
+ * than accumulated in the browser so the chart survives a page reload and is
+ * already populated the moment you open it on your phone.
+ *
+ * 720 samples at the 2.5s poll interval is 30 minutes.
+ */
+const HISTORY_LIMIT = 720;
+/** @type {{t:number, [sensor:string]: {a:number|null, g:number|null}}[]} */
+const history = [];
+
+function recordHistory(printer, now) {
+  const entry = { t: now };
+  for (const sensor of listSensors(printer)) {
+    entry[sensor.key] = {
+      a: Number.isFinite(sensor.reading?.actual) ? Number(sensor.reading.actual.toFixed(1)) : null,
+      g: Number.isFinite(sensor.reading?.target) ? Number(sensor.reading.target.toFixed(0)) : null,
+    };
+  }
+  history.push(entry);
+  if (history.length > HISTORY_LIMIT) history.shift();
+}
+
+/** Newest-last samples, for the chart. */
+export function getHistory(limit = HISTORY_LIMIT) {
+  return history.slice(-Math.max(1, Math.min(limit, HISTORY_LIMIT)));
+}
 
 /** @type {Set<string>} sensors already alerted on, so one fault doesn't spam. */
 const alertedSensors = new Set();
@@ -49,6 +78,70 @@ let previousState = null;
 let previousFile = null;
 let running = false;
 let timer = null;
+
+/**
+ * Toolhead geometry from the OctoPrint printer profile. Re-read periodically
+ * rather than on every poll: it only changes when someone edits the profile.
+ */
+let toolhead = { extruders: 1, sharedNozzle: false };
+let toolheadCheckedAt = 0;
+
+/**
+ * Parsed G-code for the file currently on the printer, for the visualiser.
+ * Downloading and parsing happen off the poll loop: a slow read must never
+ * delay temperature monitoring.
+ */
+let model = null;
+let modelKey = null;
+let modelState = 'idle';   // idle | loading | ready | unavailable
+let modelError = null;
+
+/** Identity of the loaded file — path plus size, so a re-slice re-parses. */
+function fileKey(job) {
+  const file = job?.job?.file;
+  const path = file?.path || file?.name;
+  return path ? `${path}|${file.size ?? 0}` : null;
+}
+
+function ensureModel(job) {
+  const key = fileKey(job);
+
+  if (!key) {
+    model = null;
+    modelKey = null;
+    modelError = null;
+    modelState = 'idle';
+    return;
+  }
+  if (key === modelKey) return;
+
+  modelKey = key;
+  model = null;
+  modelError = null;
+  modelState = 'loading';
+
+  const path = job.job.file.path || job.job.file.name;
+  (async () => {
+    try {
+      const text = await octo.downloadGcode(path);
+      if (modelKey !== key) return;          // the job changed underneath us
+      const parsed = parseGcode(text);
+      if (modelKey !== key) return;
+      model = parsed;
+      modelState = 'ready';
+      logEvent('info', 'model_ready',
+        `Visualiser: ${parsed.layers.length} layers parsed from ${path}${parsed.truncated ? ' (simplified)' : ''}.`);
+    } catch (err) {
+      if (modelKey !== key) return;
+      modelState = 'unavailable';
+      modelError = err.message;
+      logEvent('warn', 'model_failed', `Visualiser could not read ${path}: ${err.message}`);
+    }
+  })();
+}
+
+/** The parsed model, for the /api/gcode/model endpoint. */
+export const getModel = () => (modelState === 'ready' && model ? { key: modelKey, model } : null);
 
 function formatDuration(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return null;
@@ -100,9 +193,12 @@ function checkStall(state, job, now) {
 
 /**
  * Discover which heaters this printer actually has, from what OctoPrint
- * reports rather than from an assumption. The SV02 is dual-extruder, so
- * `tool1` is expected — but a single-hotend conversion or a firmware that
- * only reports one tool works with the same code.
+ * reports rather than from an assumption.
+ *
+ * A shared nozzle is ONE heater that OctoPrint reports once per extruder
+ * drive -- on the SV02 the same reading appears as both `tool0` and `tool1`.
+ * Only `tool0` is kept in that case; otherwise the dashboard would show one
+ * heater twice and a single fault would raise one alert per drive.
  *
  * Sorted so tools come before the bed, and tool0 before tool1.
  *
@@ -111,25 +207,28 @@ function checkStall(state, job, now) {
 function listSensors(printer) {
   const temps = printer?.temperature || {};
 
-  return Object.keys(temps)
+  const keys = Object.keys(temps)
     .filter((key) => /^(tool\d+|bed)$/.test(key) && temps[key] && typeof temps[key] === 'object')
+    .filter((key) => !(toolhead.sharedNozzle && /^tool[1-9]\d*$/.test(key)))
     .sort((a, b) => {
       if (a === 'bed') return 1;
       if (b === 'bed') return -1;
       return a.localeCompare(b, undefined, { numeric: true });
-    })
-    .map((key) => ({
-      key,
-      kind: key === 'bed' ? 'bed' : 'tool',
-      label: sensorLabel(key, temps),
-      reading: temps[key],
-    }));
+    });
+
+  const toolCount = keys.filter((key) => key !== 'bed').length;
+
+  return keys.map((key) => ({
+    key,
+    kind: key === 'bed' ? 'bed' : 'tool',
+    label: sensorLabel(key, toolCount),
+    reading: temps[key],
+  }));
 }
 
-/** Human label: a lone hotend is just "Nozzle"; two become "Nozzle 1"/"Nozzle 2". */
-function sensorLabel(key, temps) {
+/** Human label: a lone nozzle is just "Nozzle"; two become "Nozzle 1"/"Nozzle 2". */
+function sensorLabel(key, toolCount) {
   if (key === 'bed') return 'Bed';
-  const toolCount = Object.keys(temps).filter((k) => /^tool\d+$/.test(k)).length;
   if (toolCount <= 1) return 'Nozzle';
   return `Nozzle ${Number(key.replace('tool', '')) + 1}`;
 }
@@ -273,6 +372,22 @@ async function poll() {
       logEvent('info', 'octoprint_back', 'Reconnected to OctoPrint.');
     }
 
+    // Re-read the toolhead geometry now and then, and straight away after a
+    // reconnect, so a profile edit shows up without restarting the app. It must
+    // happen before the history sample, which depends on it.
+    if (!printer?.__disconnected && now - toolheadCheckedAt >= config.profileRefreshMs) {
+      toolheadCheckedAt = now;
+      try {
+        toolhead = await octo.getToolhead();
+      } catch (err) {
+        logEvent('warn', 'profile_unreadable', `Could not read the printer profile: ${err.message}`);
+      }
+    }
+
+    ensureModel(job);
+
+    recordHistory(printer, now);
+
     await handleStateChange(state, job);
     if (job?.job?.file?.name) previousFile = job.job.file.name;
 
@@ -310,6 +425,7 @@ async function poll() {
     }
 
     previousState = 'offline';
+    toolheadCheckedAt = 0;
   }
 }
 
@@ -336,6 +452,28 @@ export function stopMonitor() {
   if (timer) clearTimeout(timer);
 }
 
+/**
+ * Visualiser state for the snapshot. `filepos` is OctoPrint's byte offset into
+ * the G-code, which `locate()` turns into a layer and a point on that layer.
+ */
+function visualState(job) {
+  const filepos = job?.progress?.filepos ?? null;
+  const at = modelState === 'ready' ? locate(model, filepos) : null;
+
+  return {
+    state: modelState,
+    key: modelKey,
+    error: modelError,
+    truncated: model?.truncated ?? false,
+    layerCount: model?.layers.length ?? 0,
+    filepos,
+    layer: at?.layer ?? null,
+    z: at?.z ?? null,
+    fraction: at?.fraction ?? null,
+    nozzle: at && Number.isFinite(at.x) ? { x: at.x, y: at.y } : null,
+  };
+}
+
 /** Latest cached snapshot, shaped for the frontend. */
 export function getSnapshot() {
   const { state, printer, job, error, updatedAt } = snapshot;
@@ -346,8 +484,8 @@ export function getSnapshot() {
     updatedAt,
     offlineReason: printer?.__disconnected ? printer.reason : error,
 
-    // One entry per heater the printer actually reports, so the dashboard
-    // renders two nozzles on a dual-extruder SV02 and one on a single.
+    // One entry per heater the printer actually has. A shared nozzle counts
+    // once, however many extruder drives feed it.
     sensors: listSensors(printer).map((sensor) => ({
       key: sensor.key,
       label: sensor.label,
@@ -360,6 +498,14 @@ export function getSnapshot() {
         : null,
       alerting: alertedSensors.has(sensor.key),
     })),
+    // Extruder drives are separate from heaters: the SV02 has two drives
+    // feeding one nozzle, and either drive can still be extruded on.
+    toolhead: { extruders: toolhead.extruders, sharedNozzle: toolhead.sharedNozzle },
+
+    // Where the printer is inside the sliced file: layer, height and the
+    // nozzle's position along that layer, all derived from OctoPrint's real
+    // byte offset. Null until a model has been parsed.
+    visual: visualState(job),
     job: {
       file: job?.job?.file?.name ?? null,
       path: job?.job?.file?.path ?? job?.job?.file?.name ?? null,

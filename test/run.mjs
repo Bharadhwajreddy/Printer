@@ -89,6 +89,7 @@ const server = spawn(process.execPath, ['server/index.js'], {
     TRUST_PROXY_HTTPS: 'false',
     TEMP_DEVIATION_C: '15',
     TEMP_DEVIATION_SECONDS: '3',
+    PROFILE_REFRESH_MS: '500',
     STALL_MINUTES: '0.05',
     LOG_FILE: './data/test-events.log',
   },
@@ -269,6 +270,249 @@ try {
     const { status, body } = await post('/api/control/command', { id: 'home' });
     assert.equal(status, 409);
     assert.match(body.error, /not safe/);
+  });
+
+  console.log('\nMotion and tuning');
+
+  /** Last G-code batch the server actually sent to the printer. */
+  const lastGcode = () =>
+    octoMock.received.filter((r) => r.path === '/api/printer/command').at(-1).body.commands;
+
+  await test('jogging wraps the move in relative mode and returns to absolute', async () => {
+    octoMock.setMode('idle');
+    await waitForState('idle');
+    const { status } = await post('/api/control/jog', { axis: 'x', distance: 10 });
+    assert.equal(status, 200);
+    // Leaving the firmware in G91 would silently corrupt the next print.
+    assert.deepEqual(lastGcode(), ['G91', 'G0 X10 F3000', 'G90']);
+  });
+
+  await test('a jog distance beyond the limit is clamped, not sent raw', async () => {
+    await post('/api/control/jog', { axis: 'z', distance: 99999 });
+    assert.deepEqual(lastGcode(), ['G91', 'G0 Z100 F600', 'G90']);
+  });
+
+  await test('an unknown jog axis is refused', async () => {
+    const { status } = await post('/api/control/jog', { axis: 'a', distance: 1 });
+    assert.equal(status, 400);
+  });
+
+  await test('homing named axes sends only those axes', async () => {
+    await post('/api/control/home', { axes: ['x', 'y'] });
+    assert.deepEqual(lastGcode(), ['G28 X Y']);
+  });
+
+  await test('homing with no axes homes everything', async () => {
+    await post('/api/control/home', { axes: [] });
+    assert.deepEqual(lastGcode(), ['G28']);
+  });
+
+  await test('extruding is refused while the nozzle is cold', async () => {
+    // tool1 sits at room temperature in the mock.
+    const { status, body } = await post('/api/control/extrude', { tool: 'tool1', amount: 10 });
+    assert.equal(status, 409);
+    assert.match(body.error, /170/);
+  });
+
+  await test('extruding on a hot nozzle selects the tool first', async () => {
+    const { status } = await post('/api/control/extrude', { tool: 'tool0', amount: 5 });
+    assert.equal(status, 200);
+    assert.deepEqual(lastGcode(), ['T0', 'G91', 'G1 E5 F300', 'G90']);
+  });
+
+  await test('the fan converts percent to PWM, and zero turns it off', async () => {
+    await post('/api/control/fan', { percent: 100 });
+    assert.deepEqual(lastGcode(), ['M106 S255']);
+    await post('/api/control/fan', { percent: 0 });
+    assert.deepEqual(lastGcode(), ['M107']);
+  });
+
+  await test('feedrate and flow are clamped to safe ranges', async () => {
+    await post('/api/control/feedrate', { percent: 9999 });
+    assert.deepEqual(lastGcode(), ['M220 S300']);
+    await post('/api/control/flow', { percent: 0 });
+    assert.deepEqual(lastGcode(), ['M221 S50']);
+  });
+
+  await test('a babystep larger than half a millimetre is clamped', async () => {
+    await post('/api/control/babystep', { delta: 5 });
+    assert.deepEqual(lastGcode(), ['M290 Z0.5']);
+  });
+
+  await test('temperature history is recorded for the chart', async () => {
+    const { status, body } = await call('/api/history?limit=10');
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(body.samples) && body.samples.length > 0, 'expected samples');
+    assert.ok(Number.isFinite(body.samples.at(-1).t), 'each sample needs a timestamp');
+    assert.ok(body.samples.at(-1).tool0, 'expected a tool0 series');
+  });
+
+  await test('motion is refused while a print is running', async () => {
+    octoMock.setMode('printing');
+    await waitForState('printing');
+    for (const [path, payload] of [
+      ['/api/control/jog', { axis: 'x', distance: 1 }],
+      ['/api/control/home', { axes: ['z'] }],
+      ['/api/control/extrude', { tool: 'tool0', amount: 1 }],
+    ]) {
+      const { status } = await post(path, payload);
+      assert.equal(status, 409, `${path} must be refused mid-print`);
+    }
+  });
+
+  await test('tuning IS allowed while printing', async () => {
+    // Adjusting speed, flow and fan mid-print is the whole point of having them.
+    for (const [path, payload] of [
+      ['/api/control/fan', { percent: 50 }],
+      ['/api/control/feedrate', { percent: 120 }],
+      ['/api/control/flow', { percent: 95 }],
+      ['/api/control/babystep', { delta: -0.05 }],
+    ]) {
+      const { status } = await post(path, payload);
+      assert.equal(status, 200, `${path} must work mid-print`);
+    }
+  });
+
+  console.log('\nShared nozzle (the real SV02 layout)');
+
+  /** Poll until the server has re-read the printer profile. */
+  async function waitForToolhead(shared, timeoutMs = 12000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const { body } = await call('/api/status');
+      if (body.toolhead && body.toolhead.sharedNozzle === shared) return body;
+      await sleep(300);
+    }
+    throw new Error(`toolhead.sharedNozzle never became ${shared}`);
+  }
+
+  await test('the toolhead geometry comes from the printer profile', async () => {
+    const body = await waitForToolhead(false);
+    assert.equal(body.toolhead.extruders, 2);
+    assert.equal(body.sensors.filter((s) => s.kind === 'tool').length, 2);
+  });
+
+  await test('a shared nozzle is shown as ONE heater, not one per drive', async () => {
+    octoMock.setProfile({ sharedNozzle: true });
+    const body = await waitForToolhead(true);
+    const tools = body.sensors.filter((s) => s.kind === 'tool');
+    assert.equal(tools.length, 1, 'two drives feeding one nozzle are one heater');
+    assert.equal(tools[0].key, 'tool0');
+    assert.equal(tools[0].label, 'Nozzle');
+    assert.equal(body.toolhead.extruders, 2, 'both drives are still real');
+  });
+
+  await test('the chart history records the shared nozzle once', async () => {
+    await sleep(3000);
+    const { body } = await call('/api/history?limit=1');
+    const latest = body.samples.at(-1);
+    assert.ok(latest.tool0, 'expected the shared nozzle as tool0');
+    assert.equal(latest.tool1, undefined, 'tool1 must not appear as a second heater');
+  });
+
+  await test('drive 2 extrudes through the shared nozzle', async () => {
+    octoMock.setMode('idle');
+    await waitForState('idle');
+    const { status, body } = await post('/api/control/extrude', { tool: 'tool1', amount: 5 });
+    assert.equal(status, 200, body && body.error);
+    assert.deepEqual(lastGcode(), ['T1', 'G91', 'G1 E5 F300', 'G90']);
+  });
+
+  await test('a drive the printer does not have is refused', async () => {
+    const { status } = await post('/api/control/extrude', { tool: 'tool2', amount: 5 });
+    assert.equal(status, 400);
+  });
+
+  await test('switching back to independent hotends shows both again', async () => {
+    octoMock.setProfile({ sharedNozzle: false });
+    const body = await waitForToolhead(false);
+    assert.equal(body.sensors.filter((s) => s.kind === 'tool').length, 2);
+    octoMock.setMode('printing');
+    await waitForState('printing');
+  });
+
+  console.log('\nPrint visualiser');
+
+  await test('the parser finds layers, bounds and byte ranges', async () => {
+    const { parseGcode, locate } = await import('../server/gcode-model.js');
+    const src = [
+      'G90', 'M82',
+      'G1 Z0.2 F600',
+      'G1 X0 Y0 E0.1', 'G1 X20 Y0 E1', 'G1 X20 Y20 E2',
+      'G1 X60 Y60 F3000',
+      'G1 Z0.4 F600',
+      'G1 X0 Y0 F3000',
+      'G1 X0 Y0 E3', 'G1 X20 Y0 E4',
+    ].join('\n') + '\n';
+
+    const model = parseGcode(src, { tolerance: 0.01 });
+    assert.equal(model.layers.length, 2);
+    assert.deepEqual(model.layers.map((l) => l.z), [0.2, 0.4]);
+    assert.equal(model.bounds.maxX, 20);
+    assert.ok(model.layers[0].endByte > model.layers[0].startByte, 'layers need a byte range');
+
+    // The travel to (60,60) must not be drawn as printed plastic.
+    const drawn = model.layers.flatMap((l) => l.paths.flat());
+    assert.ok(Math.max(...drawn) <= 20, 'a travel move leaked into the geometry');
+
+    const at = locate(model, model.layers[1].startByte + 1);
+    assert.equal(at.layer, 1);
+    assert.equal(at.z, 0.4);
+  });
+
+  await test('relative moves and G92 resets are followed', async () => {
+    const { parseGcode } = await import('../server/gcode-model.js');
+    const src = [
+      'G90', 'M83', 'G1 Z0.2',
+      'G1 X10 Y10 E1',
+      'G91', 'G1 X5 Y0 E1',
+      'G90', 'G92 X0 Y0', 'G1 X5 Y0 E1',
+    ].join('\n');
+
+    const model = parseGcode(src, { tolerance: 0.01 });
+    assert.equal(model.layers.length, 1);
+    assert.equal(model.bounds.maxX, 15, 'the relative move should reach X15');
+  });
+
+  await test('a byte offset past the end lands on the last layer', async () => {
+    const { parseGcode, locate } = await import('../server/gcode-model.js');
+    const model = parseGcode('G90\nM82\nG1 Z0.2\nG1 X0 Y0 E1\nG1 X5 Y0 E2\n', { tolerance: 0.01 });
+    const at = locate(model, 10_000_000);
+    assert.equal(at.layer, model.layers.length - 1);
+    assert.equal(at.fraction, 1);
+  });
+
+  await test('the visualiser model becomes available for the loaded file', async () => {
+    octoMock.setMode('printing');
+    await waitForState('printing');
+
+    let visual = null;
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      const res = await call('/api/status');
+      visual = res.body.visual;
+      if (visual && visual.state === 'ready') break;
+      await sleep(400);
+    }
+
+    assert.equal(visual.state, 'ready', visual && visual.error);
+    assert.ok(visual.layerCount >= 4, `expected layers, got ${visual.layerCount}`);
+    assert.ok(Number.isFinite(visual.layer), 'expected a current layer');
+    assert.ok(visual.nozzle && Number.isFinite(visual.nozzle.x), 'expected a nozzle position');
+  });
+
+  await test('the model endpoint returns the layer geometry', async () => {
+    const { status, body } = await call('/api/gcode/model');
+    assert.equal(status, 200);
+    assert.ok(body.key, 'the payload identifies which file it is');
+    assert.ok(Array.isArray(body.layers) && body.layers.length >= 4);
+    assert.ok(Array.isArray(body.layers[0].paths[0]), 'each layer carries paths');
+    assert.ok(body.bounds.maxX >= 20);
+  });
+
+  await test('the model endpoint needs a login', async () => {
+    const res = await fetch(`${BASE}/api/gcode/model`);
+    assert.equal(res.status, 401);
   });
 
   console.log('\nStored files');
@@ -558,7 +802,12 @@ try {
 
   await test('the stall is logged once, not every poll', async () => {
     const { body } = await call('/api/events?limit=60');
-    const stalls = body.events.filter((e) => e.type === 'print_stalled');
+    // Earlier sections also hold a never-advancing print past the threshold
+    // and log stalls of their own, so count only the current print's. Events
+    // arrive newest first.
+    const started = body.events.findIndex((e) => e.type === 'print_started');
+    const current = started === -1 ? body.events : body.events.slice(0, started);
+    const stalls = current.filter((e) => e.type === 'print_stalled');
     assert.equal(stalls.length, 1, `expected exactly one stall event, got ${stalls.length}`);
   });
 

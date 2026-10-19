@@ -3,188 +3,474 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#14161a">
+<meta name="theme-color" content="#f3f2ee">
 <title>SV02 Control</title>
+<link rel="preload" href="/fonts/ibm-plex-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/ibm-plex-mono-latin-500-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/styles.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖨️</text></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='10' fill='%2316181b'/><text x='32' y='40' font-family='monospace' font-size='20' font-weight='700' text-anchor='middle' fill='%23fdfcf9'>SV</text></svg>">
 </head>
 <body>
 
-<!-- Login ---------------------------------------------------------------->
+<!-- Login ------------------------------------------------------------------>
 <section id="login-screen" class="login" hidden>
   <form id="login-form" class="login-card">
-    <h1>SV02 Control</h1>
-    <p class="muted">Sign in to reach the printer.</p>
-    <input id="password" type="password" placeholder="Password" autocomplete="current-password" required>
-    <button type="submit" id="login-button">Sign in</button>
-    <p id="login-error" class="error" hidden></p>
+    <div class="login-strip">
+      <span class="unit-mark sm" aria-hidden="true">SV02</span>
+      <span class="code">OCTOPI · SECURE CONSOLE</span>
+    </div>
+    <div class="login-body">
+      <div class="login-title">
+        <span class="k">Sovol SV02 · 2-in-1 dual extruder</span>
+        <h1>Printer control</h1>
+      </div>
+      <p class="sub">Sign in to monitor and operate the machine.</p>
+      <label class="field">
+        <span class="k">Password</span>
+        <input id="password" class="input" type="password" autocomplete="current-password" required>
+      </label>
+      <button type="submit" id="login-button" class="btn btn-ink btn-block">Sign in</button>
+      <p id="login-error" class="form-error" role="alert" hidden></p>
+    </div>
+    <div class="login-foot">
+      <span class="code">OctoPrint relay</span>
+      <span class="code">Every sign-in is logged</span>
+    </div>
   </form>
 </section>
 
-<!-- Dashboard ------------------------------------------------------------->
-<main id="dashboard" hidden>
+<!-- Dashboard -------------------------------------------------------------->
+<div id="dashboard" hidden>
 
   <header class="topbar">
-    <div class="brand">
-      <span id="state-dot" class="dot"></span>
-      <div>
+    <div class="id-block">
+      <span class="unit-mark" aria-hidden="true">SV02</span>
+      <div class="unit-meta">
         <strong>Sovol SV02</strong>
-        <span id="state-label" class="state-label">Connecting…</span>
+        <span>OCTOPI · 2-IN-1 HOTEND</span>
       </div>
     </div>
-    <button id="logout" class="ghost" type="button">Sign out</button>
+    <div class="state-chip" id="state-chip" data-state="connecting" role="status" aria-live="polite">
+      <span class="led" aria-hidden="true"></span>
+      <span id="state-label">Connecting…</span>
+    </div>
+    <div class="topbar-right">
+      <div class="readout-inline hide-sm"><span class="k">Link</span><span class="v" id="link-latency">—</span></div>
+      <div class="readout-inline hide-sm"><span class="k">Local time</span><span class="v" id="clock">--:--:--</span></div>
+      <button id="logout" class="btn btn-ghost btn-sm" type="button">Sign out</button>
+    </div>
   </header>
+
+  <!-- Commands that must always be reachable: a strip on desktop, a thumb
+       bar on a phone. Kept outside every tab panel so hiding a panel can
+       never hide the emergency stop. -->
+  <div class="command-dock" id="command-dock">
+    <div class="dock-job">
+      <span class="k">Job</span>
+      <span class="dock-file" id="dock-file">No job loaded</span>
+      <div class="meter thin dock-meter" aria-hidden="true"><div class="meter-fill" id="dock-fill"></div></div>
+      <span class="dock-pct" id="dock-pct">—</span>
+    </div>
+    <div class="dock-actions">
+      <button id="btn-reconnect" class="btn btn-outline" type="button" hidden>Reconnect printer</button>
+      <button id="btn-pause" class="btn btn-outline" type="button" disabled>Pause</button>
+      <button id="btn-cancel" class="btn btn-danger" type="button" disabled>Cancel</button>
+      <button id="btn-estop" class="btn btn-estop" type="button" title="Emergency stop — sends M112">E-STOP</button>
+    </div>
+  </div>
+
+  <!-- Why the printer is offline, and the one-tap fix. Shown only when it
+       is offline or in error. -->
+  <div class="diagnostics" id="diagnostics" hidden>
+    <span class="diag-glyph" aria-hidden="true">!</span>
+    <p id="diag-hint" class="diag-hint"></p>
+    <label class="diag-baud" id="diag-baud-wrap"><span class="k">Baud</span>
+      <select id="diag-baud" class="input input-sm mono" aria-label="Baud rate"></select>
+    </label>
+  </div>
 
   <div id="banners" class="banners"></div>
 
-  <!-- Camera is the centrepiece -->
-  <section class="camera-panel">
-    <div class="camera-frame">
-      <img id="camera" alt="Live view of the printer">
-      <div id="camera-overlay" class="camera-overlay">
-        <span class="spinner"></span>
-        <p id="camera-message">Connecting to camera…</p>
-        <button id="camera-retry" class="ghost small" type="button" hidden>Retry now</button>
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button class="tab active" type="button" data-tab="monitor" role="tab">Monitor</button>
+    <button class="tab" type="button" data-tab="motion" role="tab">Motion</button>
+    <button class="tab" type="button" data-tab="tune" role="tab">Tune</button>
+    <button class="tab" type="button" data-tab="files" role="tab">Files</button>
+    <button class="tab" type="button" data-tab="log" role="tab">Log</button>
+  </nav>
+
+  <main class="deck">
+
+    <!-- 01 Optical ------------------------------------------------------->
+    <section class="module mod-camera panel active" data-panel="monitor" aria-labelledby="h-optical">
+      <header class="mod-head">
+        <span class="mod-idx">01</span>
+        <h2 id="h-optical">Optical</h2>
+        <span class="code">CAM-01 · MJPEG relay</span>
+      </header>
+
+      <div class="viewfinder" id="viewfinder">
+        <img id="camera" alt="Live view of the printer">
+        <span class="vf-corner tl" aria-hidden="true"></span>
+        <span class="vf-corner tr" aria-hidden="true"></span>
+        <span class="vf-corner bl" aria-hidden="true"></span>
+        <span class="vf-corner br" aria-hidden="true"></span>
+        <span class="vf-cross" aria-hidden="true"></span>
+
+        <div class="vf-hud top">
+          <span class="hud-chip" id="camera-badge" hidden><span class="rec"></span>LIVE</span>
+          <span class="hud-chip" id="camera-mode">STREAM</span>
+          <span class="hud-spacer"></span>
+          <button id="camera-expand" class="hud-btn" type="button" title="Fullscreen" aria-label="Fullscreen">⤢</button>
+        </div>
+        <div class="vf-hud bottom">
+          <span class="hud-chip" id="camera-clock">--:--:--</span>
+          <span class="hud-spacer"></span>
+          <span class="hud-chip hide-sm">VOL 280 × 240 × 300 mm</span>
+        </div>
+
+        <div id="camera-overlay" class="camera-overlay">
+          <span class="spinner"></span>
+          <p id="camera-message">Connecting to camera…</p>
+          <button id="camera-retry" class="btn btn-sm" type="button" hidden>Retry now</button>
+        </div>
       </div>
-      <div class="camera-badge"><span class="pulse"></span> LIVE</div>
-    </div>
-  </section>
 
-  <!-- Layer view: the shape of the layer being printed, with the nozzle on it -->
-  <section class="card layer-card" id="layer-card" hidden>
-    <div class="row between">
-      <h3>This layer</h3>
-      <span class="layer-meta" id="layer-meta">—</span>
-    </div>
-    <div class="layer-canvas-wrap">
-      <canvas id="layer-canvas" width="600" height="600"></canvas>
-      <div class="layer-overlay" id="layer-overlay"><span class="spinner"></span><p id="layer-message">Reading the G-code…</p></div>
-    </div>
-    <div class="layer-controls">
-      <input id="layer-slider" type="range" min="0" max="0" value="0" aria-label="Layer">
-      <button id="layer-follow" class="ghost small" type="button">Following</button>
-    </div>
-  </section>
-
-  <!-- Progress -->
-  <section class="card" id="progress-card">
-    <div class="row between">
-      <h2 id="job-file">No job loaded</h2>
-      <span id="job-percent" class="percent">—</span>
-    </div>
-    <div class="progress"><div id="progress-fill" class="progress-fill"></div></div>
-    <div class="row between muted small">
-      <span id="job-elapsed">Elapsed —</span>
-      <span id="job-remaining">Remaining —</span>
-    </div>
-  </section>
-
-  <!-- Temperatures. Cards are built from whatever heaters the printer
-       reports, so a dual-extruder SV02 shows both nozzles automatically. -->
-  <section class="grid-2" id="temps"></section>
-
-  <!-- Controls -->
-  <section class="card">
-    <h3>Controls</h3>
-    <div class="controls">
-      <button id="btn-pause" class="primary" type="button" disabled>Pause</button>
-      <button id="btn-cancel" class="danger" type="button" disabled>Cancel print</button>
-      <button id="btn-estop" class="estop" type="button">Emergency stop</button>
-    </div>
-    <p class="muted small">Emergency stop sends M112. The printer halts instantly and needs a reconnect or power cycle afterwards.</p>
-    <div id="diagnostics" class="diagnostics" hidden>
-      <p id="diag-hint" class="small"></p>
-      <div class="diag-actions">
-        <select id="diag-baud" aria-label="Baud rate"></select>
-        <button id="btn-reconnect" class="ghost small" type="button">Connect printer</button>
+      <div class="job">
+        <div class="job-top">
+          <div class="job-id">
+            <span class="k">Current job</span>
+            <span id="job-file" class="job-file">No job loaded</span>
+          </div>
+          <div class="job-hero"><span id="job-percent">—</span><small>%</small></div>
+        </div>
+        <div class="meter" id="job-meter" role="progressbar" aria-label="Print progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div class="meter-fill" id="progress-fill"></div>
+          <div class="meter-ticks" aria-hidden="true"></div>
+        </div>
+        <dl class="kv-grid">
+          <div><dt>Elapsed</dt><dd id="job-elapsed">—</dd></div>
+          <div><dt>Remaining</dt><dd id="job-remaining">—</dd></div>
+          <div><dt>Finishes</dt><dd id="job-eta">—</dd></div>
+          <div><dt>Slicer est.</dt><dd id="job-estimate">—</dd></div>
+        </dl>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <!-- Live G-code: the file scrolling past as the printer consumes it -->
-  <section class="card" id="gcode-card" hidden>
-    <div class="row between">
-      <h3>G-code</h3>
-      <span class="layer-meta" id="gcode-meta">—</span>
-    </div>
-    <ol class="gcode-lines" id="gcode-lines"></ol>
-  </section>
+    <!-- 02 Layer view ---------------------------------------------------->
+    <section class="module mod-viz panel active" data-panel="monitor" aria-labelledby="h-viz">
+      <header class="mod-head">
+        <span class="mod-idx">02</span>
+        <h2 id="h-viz">Layer view</h2>
+        <span class="code" id="viz-code">no file loaded</span>
+        <div class="mod-tools">
+          <button id="viz-follow" class="btn btn-ghost btn-sm" type="button" aria-pressed="true">Following print</button>
+        </div>
+      </header>
 
-  <!-- Send a command straight to the printer -->
-  <section class="card">
-    <h3>Send G-code</h3>
-    <form class="gcode-send" id="gcode-form">
-      <input id="gcode-input" type="text" placeholder="e.g. M106 S255" autocomplete="off"
-             autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="200">
-      <button class="primary" id="gcode-send" type="submit">Send</button>
-    </form>
-    <div class="gcode-quick" id="gcode-quick"></div>
-    <p class="muted small">Goes straight to the printer. Risky commands ask first, and every
-      one is written to the log. The printer's replies are not available over this API.</p>
-  </section>
+      <div class="viz-grid">
+        <div class="viz-pane">
+          <canvas id="viz-2d" role="img" aria-label="Top-down view of the layer being printed"></canvas>
+          <span class="viz-tag">2D · this layer</span>
+          <p class="viz-empty" id="viz-empty-2d">No file loaded.</p>
+        </div>
+        <div class="viz-pane">
+          <canvas id="viz-3d" role="img" aria-label="Three-dimensional view of the layers printed so far"></canvas>
+          <span class="viz-tag">3D · printed so far</span>
+          <p class="viz-empty" id="viz-empty-3d">No file loaded.</p>
+        </div>
+      </div>
 
-  <!-- Maintenance -->
-  <section class="card">
-    <h3>Maintenance</h3>
-    <div id="maintenance" class="maintenance"></div>
-    <p class="muted small">Auto bed level runs G28 then G29, and only does anything once a probe such as a BLTouch is fitted.</p>
-  </section>
+      <div class="viz-bar">
+        <div class="viz-readout">
+          <span>Layer <b id="viz-layer">—</b></span>
+          <span>Z <b id="viz-z">—</b></span>
+          <span>X <b id="viz-x">—</b></span>
+          <span>Y <b id="viz-y">—</b></span>
+        </div>
+        <input id="viz-slider" class="slider" type="range" min="1" max="1" value="1" aria-label="Layer to show">
+      </div>
+    </section>
 
-  <!-- Stored files -->
-  <section class="card">
-    <div class="row between">
-      <h3>On the printer</h3>
-      <button id="refresh-files" class="ghost small" type="button">Refresh</button>
-    </div>
-    <ul id="file-list" class="files"><li class="muted small">Loading…</li></ul>
-  </section>
+    <!-- 03 Live G-code --------------------------------------------------->
+    <section class="module mod-gcode panel active" data-panel="monitor" id="gcode-card" aria-labelledby="h-gcode" hidden>
+      <header class="mod-head">
+        <span class="mod-idx">03</span>
+        <h2 id="h-gcode">Live G-code</h2>
+        <span class="code" id="gcode-meta">—</span>
+      </header>
+      <ol class="gcode-lines" id="gcode-lines"></ol>
+    </section>
 
-  <!-- Upload -->
-  <section class="card">
-    <h3>Upload G-code</h3>
-    <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Choose or drop a G-code file">
-      <p><strong>Drop a .gcode file here</strong></p>
-      <p class="muted small">or tap to choose one</p>
-      <input id="file-input" type="file" accept=".gcode,.gco,.g" hidden>
-    </div>
-    <div id="file-chosen" class="file-chosen" hidden>
-      <span id="file-name"></span>
-      <button id="file-clear" class="ghost small" type="button">Clear</button>
-    </div>
-    <label class="checkbox">
-      <input id="start-now" type="checkbox" checked>
-      Start printing immediately after upload
-    </label>
-    <button id="btn-upload" class="primary" type="button" disabled>Upload</button>
-    <div id="upload-progress" class="progress thin" hidden><div id="upload-fill" class="progress-fill"></div></div>
-    <p id="upload-status" class="small" hidden></p>
-  </section>
+    <!-- 04 Thermal ------------------------------------------------------->
+    <section class="module mod-thermal panel active" data-panel="monitor" aria-labelledby="h-thermal">
+      <header class="mod-head">
+        <span class="mod-idx">04</span>
+        <h2 id="h-thermal">Thermal</h2>
+        <span class="code" id="watch-code">WATCH —</span>
+        <div class="mod-tools">
+          <button id="cooldown-all" class="btn btn-outline btn-sm" type="button">All heaters off</button>
+        </div>
+      </header>
+      <div id="temps" class="heater-grid"><p class="empty-row">Waiting for the printer…</p></div>
+    </section>
 
-  <!-- Log -->
-  <section class="card">
-    <div class="row between">
-      <h3>Recent events</h3>
-      <button id="refresh-events" class="ghost small" type="button">Refresh</button>
-    </div>
-    <ul id="event-list" class="events"><li class="muted small">Loading…</li></ul>
-  </section>
+    <!-- 05 Temperature log ----------------------------------------------->
+    <section class="module mod-chart panel active" data-panel="monitor" aria-labelledby="h-chart">
+      <header class="mod-head">
+        <span class="mod-idx">05</span>
+        <h2 id="h-chart">Temperature log</h2>
+        <div class="mod-tools">
+          <div class="seg" id="chart-range" role="group" aria-label="Time range">
+            <button type="button" data-range="300">5m</button>
+            <button type="button" data-range="900">15m</button>
+            <button type="button" data-range="1800" class="active">30m</button>
+          </div>
+          <button id="chart-table-toggle" class="btn btn-ghost btn-sm" type="button" aria-pressed="false">Table</button>
+        </div>
+      </header>
+      <div class="chart-legend" id="chart-legend"></div>
+      <div class="chart-wrap" id="chart-wrap">
+        <canvas id="temp-chart" role="img" aria-label="Temperature over time for each heater. Open the table view for exact values."></canvas>
+        <div class="chart-tip" id="chart-tip" hidden></div>
+        <p class="chart-empty" id="chart-note">Collecting data…</p>
+      </div>
+      <div class="chart-table" id="chart-table" hidden></div>
+    </section>
 
-  <footer class="muted small center">
-    <span id="footer-info">Polling…</span>
+    <!-- 06 Motion -------------------------------------------------------->
+    <section class="module mod-motion panel" data-panel="motion" aria-labelledby="h-motion">
+      <header class="mod-head">
+        <span class="mod-idx">06</span>
+        <h2 id="h-motion">Motion</h2>
+        <span class="code">G91 relative · G90 restore</span>
+      </header>
+      <div class="mod-body">
+        <div class="step-row">
+          <span class="k">Step</span>
+          <div class="seg" id="jog-steps" role="group" aria-label="Jog distance">
+            <button class="step" type="button" data-step="0.1">0.1</button>
+            <button class="step active" type="button" data-step="1">1</button>
+            <button class="step" type="button" data-step="10">10</button>
+            <button class="step" type="button" data-step="100">100</button>
+          </div>
+          <span class="unit">mm</span>
+        </div>
+
+        <div class="pendant">
+          <div class="xy-pad">
+            <span class="pad-axis" style="grid-area:1/1">X · Y</span>
+            <button class="jog" style="grid-area:1/2" type="button" data-axis="y" data-dir="1" aria-label="Move Y plus"><span class="arrow">▲</span><span class="lbl">+Y</span></button>
+            <span class="pad-axis" style="grid-area:1/3">F3000</span>
+            <button class="jog" style="grid-area:2/1" type="button" data-axis="x" data-dir="-1" aria-label="Move X minus"><span class="arrow">◀</span><span class="lbl">−X</span></button>
+            <button class="jog home" style="grid-area:2/2" type="button" data-home="x,y" aria-label="Home X and Y"><span class="arrow">⌂</span><span class="lbl">XY</span></button>
+            <button class="jog" style="grid-area:2/3" type="button" data-axis="x" data-dir="1" aria-label="Move X plus"><span class="arrow">▶</span><span class="lbl">+X</span></button>
+            <button class="jog" style="grid-area:3/2" type="button" data-axis="y" data-dir="-1" aria-label="Move Y minus"><span class="arrow">▼</span><span class="lbl">−Y</span></button>
+          </div>
+          <div class="z-rail">
+            <button class="jog" type="button" data-axis="z" data-dir="1" aria-label="Move Z plus"><span class="arrow">▲</span><span class="lbl">+Z</span></button>
+            <button class="jog home" type="button" data-home="z" aria-label="Home Z"><span class="arrow">⌂</span><span class="lbl">Z</span></button>
+            <button class="jog" type="button" data-axis="z" data-dir="-1" aria-label="Move Z minus"><span class="arrow">▼</span><span class="lbl">−Z</span></button>
+          </div>
+        </div>
+
+        <div class="btn-row">
+          <button id="home-all" class="btn btn-outline" type="button">Home all <span class="code-inline">G28</span></button>
+          <button id="motors-off" class="btn btn-outline" type="button">Motors off <span class="code-inline">M18</span></button>
+        </div>
+        <p class="mod-note">Refused by the server while a print is running. Z moves at F600.</p>
+      </div>
+    </section>
+
+    <!-- 07 Extrusion ----------------------------------------------------->
+    <section class="module mod-extruder panel" data-panel="motion" aria-labelledby="h-extrude">
+      <header class="mod-head">
+        <span class="mod-idx">07</span>
+        <h2 id="h-extrude">Extrusion</h2>
+        <span class="code">G1 E · F300 (5 mm/s)</span>
+      </header>
+      <div class="mod-body">
+        <div class="field-row">
+          <span class="k">Hotend</span>
+          <div class="seg" id="extrude-tool" role="group" aria-label="Hotend"></div>
+        </div>
+        <div id="extrude-ready" class="ready-chip">Waiting for temperature…</div>
+        <div class="field-row">
+          <span class="k">Length</span>
+          <div class="seg" id="extrude-lengths" role="group" aria-label="Preset length">
+            <button type="button" data-len="1">1</button>
+            <button type="button" data-len="5">5</button>
+            <button type="button" data-len="10" class="active">10</button>
+            <button type="button" data-len="50">50</button>
+          </div>
+          <input id="extrude-amount" class="input input-sm mono" type="number" min="1" max="100" step="1" value="10" inputmode="numeric" aria-label="Length in millimetres">
+          <span class="unit">mm</span>
+        </div>
+        <div class="btn-row">
+          <button id="btn-retract" class="btn btn-outline" type="button">Retract</button>
+          <button id="btn-extrude" class="btn btn-ink" type="button">Extrude</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 08 Tuning -------------------------------------------------------->
+    <section class="module mod-tune panel" data-panel="tune" aria-labelledby="h-tune">
+      <header class="mod-head">
+        <span class="mod-idx">08</span>
+        <h2 id="h-tune">Tuning</h2>
+        <span class="code">Live · safe mid-print</span>
+      </header>
+      <div class="tune-list">
+        <div class="tune-row">
+          <div class="tune-head">
+            <span class="tune-name">Part-cooling fan</span><span class="code">M106</span>
+            <output id="fan-value" for="fan-slider">0%</output>
+          </div>
+          <input id="fan-slider" class="slider" type="range" min="0" max="100" step="5" value="0" aria-label="Fan speed">
+          <div class="scale" aria-hidden="true"><span style="left:0%">0</span><span style="left:25%">25</span><span style="left:50%">50</span><span style="left:75%">75</span><span style="left:100%">100</span></div>
+          <div class="seg">
+            <button type="button" data-fan="0">OFF</button>
+            <button type="button" data-fan="50">50%</button>
+            <button type="button" data-fan="100">100%</button>
+          </div>
+        </div>
+
+        <div class="tune-row">
+          <div class="tune-head">
+            <span class="tune-name">Print speed</span><span class="code">M220</span>
+            <output id="feed-value" for="feed-slider">100%</output>
+          </div>
+          <input id="feed-slider" class="slider" type="range" min="10" max="300" step="5" value="100" aria-label="Print speed percent">
+          <div class="scale" aria-hidden="true"><span style="left:0%">10</span><span style="left:31.03%">100</span><span style="left:65.52%">200</span><span style="left:100%">300</span></div>
+          <div><button class="btn btn-ghost btn-sm" type="button" data-reset="feed-slider">Reset to 100%</button></div>
+        </div>
+
+        <div class="tune-row">
+          <div class="tune-head">
+            <span class="tune-name">Flow rate</span><span class="code">M221</span>
+            <output id="flow-value" for="flow-slider">100%</output>
+          </div>
+          <input id="flow-slider" class="slider" type="range" min="50" max="150" step="1" value="100" aria-label="Flow rate percent">
+          <div class="scale" aria-hidden="true"><span style="left:0%">50</span><span style="left:25%">75</span><span style="left:50%">100</span><span style="left:75%">125</span><span style="left:100%">150</span></div>
+          <div><button class="btn btn-ghost btn-sm" type="button" data-reset="flow-slider">Reset to 100%</button></div>
+        </div>
+
+        <div class="tune-row">
+          <div class="tune-head">
+            <span class="tune-name">Z offset nudge</span><span class="code">M290</span>
+            <output id="baby-total">±0.00 mm</output>
+          </div>
+          <div class="baby-grid">
+            <button class="btn btn-outline" type="button" data-baby="-0.05">−0.05</button>
+            <button class="btn btn-outline" type="button" data-baby="-0.01">−0.01</button>
+            <button class="btn btn-outline" type="button" data-baby="0.01">+0.01</button>
+            <button class="btn btn-outline" type="button" data-baby="0.05">+0.05</button>
+          </div>
+          <p class="mod-note">Negative lowers the nozzle toward the bed. The total above is this session's sum — save to EEPROM to keep it.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 09 Maintenance --------------------------------------------------->
+    <section class="module mod-maint panel" data-panel="tune" aria-labelledby="h-maint">
+      <header class="mod-head">
+        <span class="mod-idx">09</span>
+        <h2 id="h-maint">Maintenance</h2>
+        <span class="code">Server allowlist</span>
+      </header>
+      <ul id="maintenance" class="cmd-list"><li class="empty-row">Loading…</li></ul>
+      <p class="mod-note pad">Auto bed level runs G28 then G29, and does nothing until a probe such as a BLTouch is fitted.</p>
+    </section>
+
+    <!-- 10 Console ------------------------------------------------------->
+    <section class="module mod-console panel" data-panel="tune" aria-labelledby="h-console">
+      <header class="mod-head">
+        <span class="mod-idx">10</span>
+        <h2 id="h-console">Send G-code</h2>
+        <span class="code">Direct · logged</span>
+      </header>
+      <div class="mod-body">
+        <form class="gcode-send" id="gcode-form">
+          <input id="gcode-input" class="input mono" type="text" placeholder="e.g. M106 S255" autocomplete="off"
+                 autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="200" aria-label="G-code command">
+          <button class="btn btn-ink" id="gcode-send" type="submit">Send</button>
+        </form>
+        <div class="gcode-quick" id="gcode-quick"></div>
+      </div>
+      <p class="mod-note pad">Goes straight to the printer. Risky commands ask first, and every one is written to the log. The printer's replies are not available over this API.</p>
+    </section>
+
+    <!-- 11 Job files ----------------------------------------------------->
+    <section class="module mod-files panel" data-panel="files" aria-labelledby="h-files">
+      <header class="mod-head">
+        <span class="mod-idx">11</span>
+        <h2 id="h-files">Job files</h2>
+        <span class="code">.gcode · .gco · .g · 250 MB</span>
+      </header>
+      <div class="mod-body">
+        <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Choose or drop a G-code file">
+          <span class="drop-icon" aria-hidden="true">↑</span>
+          <span class="drop-title">Drop a G-code file</span>
+          <span class="mod-note">or tap to browse</span>
+          <input id="file-input" type="file" accept=".gcode,.gco,.g" hidden>
+        </div>
+        <div id="file-chosen" class="file-chosen" hidden>
+          <span id="file-name"></span>
+          <button id="file-clear" class="btn btn-ghost btn-sm" type="button">Clear</button>
+        </div>
+        <div class="upload-row">
+          <label class="checkbox"><input id="start-now" type="checkbox" checked> Start printing after upload</label>
+          <button id="btn-upload" class="btn btn-ink" type="button" disabled>Upload</button>
+        </div>
+        <div id="upload-progress" class="meter thin" hidden><div id="upload-fill" class="meter-fill"></div></div>
+        <p id="upload-status" class="upload-status" hidden></p>
+      </div>
+      <div class="mod-subhead">
+        <span class="k">Stored on printer</span>
+        <button id="refresh-files" class="btn btn-ghost btn-sm" type="button">Refresh</button>
+      </div>
+      <ul id="file-list" class="file-table"><li class="empty-row">Loading…</li></ul>
+    </section>
+
+    <!-- 12 Event log ----------------------------------------------------->
+    <section class="module mod-log panel" data-panel="log" aria-labelledby="h-log">
+      <header class="mod-head">
+        <span class="mod-idx">12</span>
+        <h2 id="h-log">Event log</h2>
+        <span class="code">Newest first</span>
+        <div class="mod-tools">
+          <button id="refresh-events" class="btn btn-ghost btn-sm" type="button">Refresh</button>
+        </div>
+      </header>
+      <ol id="event-list" class="log-list"><li class="empty-row">Loading…</li></ol>
+    </section>
+
+  </main>
+
+  <footer class="statusbar">
+    <span class="sb-item" id="sb-link-item" data-state="connecting"><span class="led" aria-hidden="true"></span>Link <b id="sb-link">—</b></span>
+    <span class="sb-item">Poll <b id="sb-poll">—</b></span>
+    <span class="sb-item">Updated <b id="footer-info">—</b></span>
+    <span class="sb-item">Watch <b id="sb-watch">—</b></span>
+    <span class="sb-item">Auto-pause <b id="sb-autopause">—</b></span>
+    <span class="sb-item">Notify <b id="sb-notify">—</b></span>
   </footer>
-</main>
+</div>
 
-<!-- Confirmation dialog ---------------------------------------------------->
+<!-- Confirmation dialog ----------------------------------------------------->
 <dialog id="confirm-dialog" class="confirm">
-  <h3 id="confirm-title">Are you sure?</h3>
-  <p id="confirm-body"></p>
+  <div class="confirm-strip"><span class="k">Confirm action</span></div>
+  <div class="confirm-body">
+    <h3 id="confirm-title">Are you sure?</h3>
+    <p id="confirm-body"></p>
+  </div>
   <div class="confirm-actions">
-    <button id="confirm-no" class="ghost" type="button">Keep printing</button>
-    <button id="confirm-yes" class="danger" type="button">Confirm</button>
+    <button id="confirm-no" class="btn btn-outline" type="button">Cancel</button>
+    <button id="confirm-yes" class="btn btn-ink" type="button">Confirm</button>
   </div>
 </dialog>
 
-<div id="toast" class="toast" hidden></div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
 <script src="/app.js"></script>
 </body>

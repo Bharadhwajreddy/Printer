@@ -6,10 +6,14 @@ temperatures, the progress bar, and the buttons that matter.
 
 - **Live camera** from the IP Webcam app on your phone, front and centre, with
   automatic reconnection when the phone drops off WiFi.
-- **Live temperatures** for every heater the printer reports — the SV02 is
-  dual-extruder, so both nozzles and the bed appear, each individually
-  settable. Nothing is hardcoded: if your printer reports one hotend, you get
-  one card.
+- **Live temperatures** for every heater the printer has. The SV02's two
+  extruder drives share one nozzle, so you get a nozzle card and a bed card,
+  each settable; a printer with independent hotends gets a card per hotend.
+  Nothing is hardcoded — the layout comes from OctoPrint's printer profile.
+- **Layer view** — a 2D top-down view of the layer being printed beside a 3D
+  view of everything printed so far, with the nozzle marked on both. Drawn
+  from the sliced file and OctoPrint's byte offset into it, so it is real,
+  not a simulation — and it works when the camera phone is asleep.
 - **Progress** — filename, percentage, elapsed and remaining time.
 - **Live layer view** — the outline of the layer being printed, drawn from the
   G-code, with the nozzle moving along it. Printed sections are highlighted,
@@ -61,10 +65,20 @@ If that errors or shows something below v18, install it:
 # Raspberry Pi OS / Debian / Ubuntu
 # The standard OctoPi image is 32-bit (armv7l), and Node 22 dropped 32-bit ARM.
 # This picks the newest Node that actually runs on your Pi:
-if [ "$(uname -m)" = "aarch64" ]; then MAJOR=22; else MAJOR=20; fi
-curl -fsSL "https://deb.nodesource.com/setup_${MAJOR}.x" | sudo -E bash -
-sudo apt-get install -y nodejs
+# NodeSource no longer publishes 32-bit ARM (armhf) packages at all -- its
+# setup script exits with "Unsupported architecture: armhf". The standard
+# OctoPi image IS armhf, so use Node's own official tarball instead.
+# Node 20 is the last major line with official linux-armv7l builds.
+if [ "$(uname -m)" = "aarch64" ]; then
+  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs
+else
+  V=v20.20.2
+  curl -fsSL -o /tmp/node.tar.xz "https://nodejs.org/dist/$V/node-$V-linux-armv7l.tar.xz"
+  sudo tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1     --exclude CHANGELOG.md --exclude LICENSE --exclude README.md
+  rm /tmp/node.tar.xz
+fi
 node --version
+npm --version
 ```
 
 ---
@@ -345,7 +359,7 @@ it runs anywhere with no printer attached:
 npm test
 ```
 
-It covers authentication, the dual-extruder sensor handling, pause/resume/
+It covers authentication, multi-heater and shared-nozzle sensor handling, pause/resume/
 cancel round-trips, `M112`, the G-code allowlist, upload rejection paths, the
 camera relay (both still frames and MJPEG), temperature-anomaly detection and
 recovery, and OctoPrint going offline mid-print.

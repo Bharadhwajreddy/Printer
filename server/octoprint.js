@@ -131,6 +131,24 @@ export const getJob = () => octoFetch('/api/job');
 export const getConnection = () => octoFetch('/api/connection');
 export const getVersion = () => octoFetch('/api/version');
 
+/**
+ * The active printer profile's toolhead: how many extruder drives, and whether
+ * they share one nozzle. The SV02 is a 2-in-1-out machine -- two drives feeding
+ * a single nozzle with a single heater -- which OctoPrint models as
+ * extruder.count = 2 with sharedNozzle = true, and then reports that one heater
+ * under both `tool0` and `tool1`.
+ */
+export async function getToolhead() {
+  const data = await octoFetch('/api/printerprofiles');
+  const profiles = Object.values(data?.profiles || {});
+  const active = profiles.find((p) => p.current) || profiles.find((p) => p.default) || profiles[0];
+  const count = Number(active?.extruder?.count);
+  return {
+    extruders: Number.isInteger(count) && count > 0 ? count : 1,
+    sharedNozzle: Boolean(active?.extruder?.sharedNozzle),
+  };
+}
+
 export const pausePrint = () => postJson('/api/job', { command: 'pause', action: 'pause' });
 export const resumePrint = () => postJson('/api/job', { command: 'pause', action: 'resume' });
 export const cancelPrint = () => postJson('/api/job', { command: 'cancel' });
@@ -254,6 +272,45 @@ export async function uploadFile(buffer, filename, startNow) {
 
   // Uploads can be tens of megabytes over a slow tunnel; give them room.
   return octoFetch('/api/files/local', { method: 'POST', body: form, timeoutMs: 180000 });
+}
+
+/**
+ * Fetch the raw G-code of a stored file, for the visualiser.
+ *
+ * Capped, because the whole file is held in memory while it is parsed and the
+ * Pi has 1 GB. A file too big to visualise is not an error for the print — the
+ * dashboard just says so and carries on.
+ */
+export async function downloadGcode(filePath, maxBytes = 25 * 1024 * 1024) {
+  const encoded = filePath.split('/').map(encodeURIComponent).join('/');
+  const url = `${config.octoprintUrl}/downloads/files/local/${encoded}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120000);
+
+  try {
+    const response = await fetch(url, {
+      headers: { 'X-Api-Key': config.octoprintApiKey },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new OctoPrintError(`OctoPrint returned HTTP ${response.status} downloading ${filePath}.`, {
+        status: response.status,
+      });
+    }
+
+    const declared = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      throw new OctoPrintError(`That file is ${(declared / 1e6).toFixed(0)} MB — too large to visualise.`);
+    }
+
+    const text = await response.text();
+    if (Buffer.byteLength(text) > maxBytes) {
+      throw new OctoPrintError('That file is too large to visualise.');
+    }
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
